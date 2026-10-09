@@ -14,26 +14,19 @@ Turn any LinkedIn newsletter into a chatbot. Authors onboard their newsletter vi
 
 ```bash
 # 1. Clone and create a virtualenv
-git clone https://github.com/your-username/pulsebot
-cd pulsebot
+git clone https://github.com/drLIyer/Pulsebot
+cd Pulsebot
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 2. Set credentials (copy .env.example to .env, then edit)
-# At minimum: ANTHROPIC_API_KEY and ADMIN_KEY
-```
+# 2. Set credentials
+cp .env.example .env   # then edit — at minimum set ANTHROPIC_API_KEY and ADMIN_KEY
 
-**Production** (requires `.env`, validates credentials, logs at INFO level):
-```bash
+# 3. Start
 bash run.sh
 ```
 
-**Demo** (pre-indexed newsletter, opens browser automatically):
-```bash
-bash run_demo.sh
-```
-
-Open http://localhost:8000 to onboard a newsletter, or http://localhost:8000/c/your-handle once an author has been indexed.
+Open http://localhost:8000 to onboard a newsletter. Once indexed, readers visit http://localhost:8000/c/your-handle.
 
 ---
 
@@ -86,6 +79,19 @@ Authors can sign in with their LinkedIn account during onboarding. This pre-fill
 | `MODEL` | — | Override all tiers at once |
 | `AVAILABLE_MODELS` | `claude-sonnet-5-5,claude-opus-5-5` | Models shown in the chat UI picker (comma-separated) |
 
+### Article discovery (search engine)
+
+Pulsebot searches for an author's LinkedIn articles during onboarding and auto-refresh.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SEARCH_ENGINE` | `duckduckgo` | `duckduckgo` · `brave` · `google` |
+| `BRAVE_API_KEY` | — | Brave Search API key — free tier: 2 000 queries/month. Get one at https://brave.com/search/api/ |
+| `GOOGLE_API_KEY` | — | Google Custom Search API key |
+| `GOOGLE_CX` | — | Google Custom Search Engine ID |
+
+**Recommended for production:** set `SEARCH_ENGINE=brave` and add a `BRAVE_API_KEY`. DuckDuckGo is free but rate-limited and less reliable at scale. Google Custom Search is 100 free queries/day then $5/1000.
+
 ### Server & infra
 
 | Variable | Default | Description |
@@ -136,7 +142,6 @@ static/
   admin.html        Admin dashboard                    (GET /admin/dashboard)
 chrome-extension/   Manifest V3 browser extension
 run.sh              Production launcher (validates .env)
-run_demo.sh         Demo launcher (pre-indexed author, opens browser)
 ```
 
 ---

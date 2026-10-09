@@ -16,11 +16,13 @@ Usage:
     python fetcher.py --export linkedin_export.zip --author "lenny-rachitsky" --out ./data
 """
 
+import os
 import re
 import sys
 import time
 import zipfile
 import argparse
+import urllib.parse
 from pathlib import Path
 from typing import Optional
 
@@ -143,28 +145,102 @@ def _urls_from_listing_page(newsletter_url: str, max_articles: int = 200) -> lis
 
 def _urls_from_search(author_identifier: str, max_results: int = 60) -> list[str]:
     """
-    Use DuckDuckGo to find LinkedIn Pulse article URLs for an author.
-    author_identifier: LinkedIn handle (e.g. 'lenny-rachitsky') or display name.
+    Find LinkedIn Pulse article URLs for an author using the configured search engine.
+
+    Set SEARCH_ENGINE env var to choose the backend:
+      duckduckgo  (default, free, no key needed — less reliable in production)
+      brave       (recommended for production — set BRAVE_API_KEY)
+      google      (reliable — set GOOGLE_API_KEY and GOOGLE_CX)
     """
+    engine = os.getenv("SEARCH_ENGINE", "duckduckgo").lower().strip()
+    queries = [
+        f'site:linkedin.com/pulse "{author_identifier}"',
+        f'site:www.linkedin.com/pulse {author_identifier}',
+    ]
+
+    if engine == "brave":
+        return _search_brave(queries, max_results)
+    if engine == "google":
+        return _search_google(queries, max_results)
+    return _search_duckduckgo(queries, max_results)
+
+
+def _filter_pulse_urls(results: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for href in results:
+        href = href.split("?")[0].rstrip("/")
+        if "linkedin.com/pulse/" in href and href not in seen:
+            seen.add(href)
+            out.append(href)
+    return out
+
+
+def _search_duckduckgo(queries: list[str], max_results: int) -> list[str]:
     try:
         from ddgs import DDGS
-        queries = [
-            f'site:linkedin.com/pulse "{author_identifier}"',
-            f'site:www.linkedin.com/pulse {author_identifier}',
-        ]
-        seen: set[str] = set()
-        urls: list[str] = []
-        per_query = max(10, max_results // 2)
+        raw: list[str] = []
+        per_query = max(10, max_results // len(queries))
         with DDGS() as d:
-            for query in queries:
-                for r in d.text(query, max_results=per_query):
-                    href = r.get("href", "").split("?")[0].rstrip("/")
-                    if "linkedin.com/pulse/" in href and href not in seen:
-                        seen.add(href)
-                        urls.append(href)
-        return urls
+            for q in queries:
+                for r in d.text(q, max_results=per_query):
+                    raw.append(r.get("href", ""))
+        return _filter_pulse_urls(raw)
     except Exception:
         return []
+
+
+def _search_brave(queries: list[str], max_results: int) -> list[str]:
+    """Brave Search API — https://brave.com/search/api/ (free tier: 2000 queries/month)"""
+    import urllib.request, json as _json
+    api_key = os.getenv("BRAVE_API_KEY", "")
+    if not api_key:
+        console.print("[yellow]BRAVE_API_KEY not set — falling back to DuckDuckGo[/yellow]")
+        return _search_duckduckgo(queries, max_results)
+    raw: list[str] = []
+    per_query = max(10, max_results // len(queries))
+    for q in queries:
+        try:
+            url = f"https://api.search.brave.com/res/v1/web/search?q={urllib.parse.quote(q)}&count={per_query}"
+            req = urllib.request.Request(url, headers={
+                "Accept": "application/json",
+                "Accept-Encoding": "gzip",
+                "X-Subscription-Token": api_key,
+            })
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = _json.loads(resp.read())
+            for item in data.get("web", {}).get("results", []):
+                raw.append(item.get("url", ""))
+        except Exception as e:
+            console.print(f"[yellow]Brave search error: {e}[/yellow]")
+    return _filter_pulse_urls(raw)
+
+
+def _search_google(queries: list[str], max_results: int) -> list[str]:
+    """Google Custom Search API — https://developers.google.com/custom-search/v1
+    Free: 100 queries/day. Requires GOOGLE_API_KEY and GOOGLE_CX (search engine ID)."""
+    import urllib.request, json as _json
+    api_key = os.getenv("GOOGLE_API_KEY", "")
+    cx      = os.getenv("GOOGLE_CX", "")
+    if not api_key or not cx:
+        console.print("[yellow]GOOGLE_API_KEY or GOOGLE_CX not set — falling back to DuckDuckGo[/yellow]")
+        return _search_duckduckgo(queries, max_results)
+    raw: list[str] = []
+    per_query = min(10, max(1, max_results // len(queries)))  # Google max 10 per request
+    for q in queries:
+        try:
+            url = (
+                f"https://www.googleapis.com/customsearch/v1"
+                f"?key={api_key}&cx={cx}&q={urllib.parse.quote(q)}&num={per_query}"
+            )
+            req = urllib.request.Request(url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = _json.loads(resp.read())
+            for item in data.get("items", []):
+                raw.append(item.get("link", ""))
+        except Exception as e:
+            console.print(f"[yellow]Google search error: {e}[/yellow]")
+    return _filter_pulse_urls(raw)
 
 
 # ── LinkedIn data-export ingestion ────────────────────────────────────────────
