@@ -33,7 +33,7 @@ bash run.sh
 bash run_demo.sh
 ```
 
-Open http://localhost:8000 to onboard a newsletter, or http://localhost:8000/c/lenny-rachitsky after running the demo.
+Open http://localhost:8000 to onboard a newsletter, or http://localhost:8000/c/your-handle once an author has been indexed.
 
 ---
 
