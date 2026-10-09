@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pulsebot Admin</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #f9f9f8; --surface: #fff; --border: #e5e5e3;
+    --text: #1a1a1a; --muted: #737373;
+    --accent: #2563eb; --green: #16a34a; --red: #dc2626; --yellow: #d97706;
+    --green-bg: #f0fdf4; --red-bg: #fef2f2; --yellow-bg: #fffbeb;
+    --radius: 10px;
+  }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); padding: 24px 20px 60px; }
+  .top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; }
+  .top h1 { font-size: 20px; font-weight: 700; }
+  .top p { font-size: 13px; color: var(--muted); }
+  .refresh-row { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; display: inline-block; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; }
+  .stat .val { font-size: 28px; font-weight: 700; margin-bottom: 3px; }
+  .stat .lbl { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+
+  section { margin-bottom: 28px; }
+  section h2 { font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 10px; }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { padding: 9px 14px; text-align: left; background: #f5f5f4; border-bottom: 1px solid var(--border); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
+  td { padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 11px; font-weight: 600; }
+  .badge-done    { background: var(--green-bg);  color: var(--green); }
+  .badge-error   { background: var(--red-bg);    color: var(--red); }
+  .badge-active  { background: #eff6ff;           color: var(--accent); }
+  .badge-queued  { background: var(--yellow-bg); color: var(--yellow); }
+  .badge-free    { background: #f5f5f4;           color: var(--muted); }
+  .badge-pro     { background: #eff6ff;           color: var(--accent); }
+  .badge-power   { background: #fdf4ff;           color: #7e22ce; }
+
+  .bar-track { height: 5px; background: #e5e5e3; border-radius: 99px; overflow: hidden; min-width: 80px; }
+  .bar-fill  { height: 100%; background: var(--accent); border-radius: 99px; transition: width .4s; }
+
+  .error-text { color: var(--red); font-size: 12px; }
+  .mono { font-family: "SF Mono", "Fira Code", monospace; font-size: 12px; color: var(--muted); word-break: break-all; }
+
+  .empty { padding: 20px; text-align: center; color: var(--muted); font-size: 14px; }
+
+  #login-overlay {
+    position: fixed; inset: 0; background: var(--bg);
+    display: flex; align-items: center; justify-content: center; z-index: 10;
+  }
+  #login-overlay .box { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 32px; width: 340px; text-align: center; }
+  #login-overlay h2 { font-size: 18px; font-weight: 700; margin-bottom: 8px; }
+  #login-overlay p { font-size: 13px; color: var(--muted); margin-bottom: 20px; }
+  #login-overlay input { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 7px; font-size: 14px; margin-bottom: 12px; outline: none; }
+  #login-overlay input:focus { border-color: var(--accent); }
+  #login-overlay button { width: 100%; padding: 10px; background: var(--accent); color: #fff; border: none; border-radius: 7px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  #login-err { color: var(--red); font-size: 13px; margin-top: 8px; display: none; }
+</style>
+</head>
+<body>
+
+<div id="login-overlay">
+  <div class="box">
+    <h2>⚡ Pulsebot Admin</h2>
+    <p>Enter your admin key to continue</p>
+    <input type="password" id="key-input" placeholder="Admin key" autocomplete="off">
+    <button onclick="login()">Sign in</button>
+    <div id="login-err">Incorrect key</div>
+  </div>
+</div>
+
+<div class="top">
+  <div>
+    <h1>⚡ Pulsebot Admin</h1>
+    <p id="last-refresh">Loading…</p>
+  </div>
+  <div class="refresh-row">
+    <span class="dot" id="live-dot"></span>
+    <span>Live · refreshes every 5s</span>
+    <button onclick="refresh()" style="padding:5px 12px;border:1px solid var(--border);border-radius:6px;background:var(--surface);font-size:13px;cursor:pointer;">Refresh now</button>
+  </div>
+</div>
+
+<div class="grid" id="stats-grid">
+  <div class="stat"><div class="val" id="s-authors">—</div><div class="lbl">Indexed authors</div></div>
+  <div class="stat"><div class="val" id="s-jobs">—</div><div class="lbl">Jobs today</div></div>
+  <div class="stat"><div class="val" id="s-questions">—</div><div class="lbl">Questions today</div></div>
+  <div class="stat"><div class="val" id="s-errors">—</div><div class="lbl">Job errors</div></div>
+</div>
+
+<section>
+  <h2>Jobs</h2>
+  <div class="card"><div id="jobs-body"></div></div>
+</section>
+
+<section>
+  <h2>Indexed authors</h2>
+  <div class="card"><div id="authors-body"></div></div>
+</section>
+
+<section>
+  <h2>Usage (last 7 days)</h2>
+  <div class="card"><div id="usage-body"></div></div>
+</section>
+
+<section>
+  <h2>Error log</h2>
+  <div class="card"><div id="errors-body"></div></div>
+</section>
+
+<script>
+  let adminKey = localStorage.getItem('pb_admin_key') || '';
+  let refreshTimer = null;
+
+  async function login() {
+    const k = document.getElementById('key-input').value.trim();
+    const r = await fetch('/admin/usage?days=1', { headers: { 'x-admin-key': k } });
+    if (r.ok) {
+      adminKey = k;
+      localStorage.setItem('pb_admin_key', k);
+      document.getElementById('login-overlay').style.display = 'none';
+      startRefresh();
+    } else {
+      document.getElementById('login-err').style.display = 'block';
+    }
+  }
+
+  document.getElementById('key-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') login();
+  });
+
+  async function api(path) {
+    const r = await fetch(path, { headers: { 'x-admin-key': adminKey } });
+    if (!r.ok) throw new Error(`${r.status} ${path}`);
+    return r.json();
+  }
+
+  async function refresh() {
+    try {
+      const [health, authors, jobs, usage7, errs] = await Promise.all([
+        fetch('/health').then(r => r.json()),
+        api('/authors'),
+        api('/admin/jobs'),
+        api('/admin/usage?days=7'),
+        api('/admin/errors?limit=50'),
+      ]);
+
+      // Header
+      document.getElementById('last-refresh').textContent =
+        `Model: ${health.model} · Last refresh: ${new Date().toLocaleTimeString()}`;
+
+      // Author details
+      const authorDetails = {};
+      await Promise.all(authors.authors.map(async a => {
+        try { authorDetails[a] = await fetch(`/authors/${a}`).then(r => r.json()); } catch {}
+      }));
+
+      // Merge in-memory jobs (live) with DB history — live entries take precedence per author
+      const liveJobs = Object.values(jobs.jobs);
+      const histJobs = errs.job_history || [];
+      const liveAuthors = new Set(liveJobs.map(j => j.author));
+      const mergedJobs = [
+        ...liveJobs,
+        ...histJobs.filter(j => !liveAuthors.has(j.author)),
+      ].sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
+
+      // Stats
+      const errorCount = mergedJobs.filter(j => j.status === 'error').length;
+      const todayQ = usage7.by_author.reduce((s, r) => s + (r.requests || 0), 0);
+      document.getElementById('s-authors').textContent = authors.count;
+      document.getElementById('s-jobs').textContent = mergedJobs.length;
+      document.getElementById('s-questions').textContent = todayQ;
+      document.getElementById('s-errors').textContent = errorCount;
+      document.getElementById('s-errors').style.color = errorCount > 0 ? 'var(--red)' : '';
+
+      // Jobs table (merged)
+      const jobsEl = document.getElementById('jobs-body');
+      if (!mergedJobs.length) {
+        jobsEl.innerHTML = '<div class="empty">No jobs yet</div>';
+      } else {
+        const rows = mergedJobs.map(j => {
+          const isLive = liveAuthors.has(j.author);
+          const isActive = !['done', 'error'].includes(j.status);
+          const statusClass = j.status === 'done' ? 'done' : j.status === 'error' ? 'error' : 'active';
+          const found = j.articles_found || 0;
+          const fetched = j.articles_fetched || 0;
+          const pct = j.status === 'indexing' ? 85 :
+                      j.status === 'fetching' && found > 0 ? Math.round(20 + (fetched/found)*55) :
+                      j.status === 'discovering' ? 10 : 5;
+          const dur = j.finished_at ? `${(j.finished_at - j.started_at).toFixed(1)}s` :
+                      j.started_at ? `${(Date.now()/1000 - j.started_at).toFixed(0)}s` : '—';
+          const when = j.started_at ? new Date(j.started_at * 1000).toLocaleString() : '—';
+          const liveDot = isLive && isActive ? '<span class="dot" style="margin-right:5px;vertical-align:middle"></span>' : '';
+          const progress = isActive
+            ? `<div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>`
+            : (j.chunks ? `${j.chunks} chunks` : '—');
+          return `<tr>
+            <td><strong>${esc(j.display_name || j.author || '—')}</strong><br><span class="mono">${esc(j.author||'')}</span></td>
+            <td>${liveDot}<span class="badge badge-${statusClass}">${j.status}</span></td>
+            <td>${found > 0 ? `${fetched}/${found}` : fetched || '—'}</td>
+            <td>${progress}</td>
+            <td>${dur}</td>
+            <td class="mono" style="font-size:11px">${when}</td>
+            <td>${j.error ? `<span class="error-text">${esc(j.error)}</span>` : ''}</td>
+          </tr>`;
+        }).join('');
+        jobsEl.innerHTML = `<table><thead><tr>
+          <th>Author</th><th>Status</th><th>Articles</th><th>Progress / Chunks</th><th>Duration</th><th>Started</th><th>Error</th>
+        </tr></thead><tbody>${rows}</tbody></table>`;
+      }
+
+      // Authors table
+      const authEl = document.getElementById('authors-body');
+      if (!authors.authors.length) {
+        authEl.innerHTML = '<div class="empty">No indexed authors yet</div>';
+      } else {
+        const rows = authors.authors.map(a => {
+          const d = authorDetails[a] || {};
+          return `<tr>
+            <td><strong>${esc(a)}</strong></td>
+            <td>${d.articles || '—'}</td>
+            <td>${d.chunks || '—'}</td>
+            <td><a href="/c/${esc(a)}" target="_blank" style="color:var(--accent);font-size:13px;">/c/${esc(a)}</a></td>
+          </tr>`;
+        }).join('');
+        authEl.innerHTML = `<table><thead><tr><th>Handle</th><th>Articles</th><th>Chunks</th><th>Chat link</th></tr></thead><tbody>${rows}</tbody></table>`;
+      }
+
+      // Usage table
+      const usageEl = document.getElementById('usage-body');
+      if (!usage7.by_author.length) {
+        usageEl.innerHTML = '<div class="empty">No usage in the last 7 days</div>';
+      } else {
+        const rows = usage7.by_author.map(r => `<tr>
+          <td>${esc(r.author)}</td>
+          <td>${r.requests}</td>
+          <td>${(r.input_tokens||0).toLocaleString()}</td>
+          <td>${(r.output_tokens||0).toLocaleString()}</td>
+        </tr>`).join('');
+        usageEl.innerHTML = `<table><thead><tr><th>Author</th><th>Questions</th><th>Input tokens</th><th>Output tokens</th></tr></thead><tbody>${rows}</tbody></table>`;
+      }
+
+      // Error log (per-URL fetch errors + stage errors)
+      const errEl = document.getElementById('errors-body');
+      const errList = errs.errors || [];
+      if (!errList.length) {
+        errEl.innerHTML = '<div class="empty">No errors logged</div>';
+      } else {
+        const rows = errList.map(e => {
+          const when = new Date(e.ts * 1000).toLocaleString();
+          const stageBadge = e.stage === 'fetching' ? 'badge-queued' :
+                             e.stage === 'indexing' ? 'badge-active' : 'badge-error';
+          return `<tr>
+            <td class="mono" style="font-size:11px">${when}</td>
+            <td>${esc(e.author)}</td>
+            <td><span class="badge ${stageBadge}">${esc(e.stage)}</span></td>
+            <td class="mono" style="font-size:11px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(e.url||'')}">${esc(e.url || '—')}</td>
+            <td class="error-text">${esc(e.message)}</td>
+          </tr>`;
+        }).join('');
+        errEl.innerHTML = `<table><thead><tr>
+          <th>Time</th><th>Author</th><th>Stage</th><th>URL</th><th>Error</th>
+        </tr></thead><tbody>${rows}</tbody></table>`;
+      }
+
+    } catch (e) {
+      console.error('refresh error', e);
+      document.getElementById('last-refresh').textContent = `Error: ${e.message}`;
+      document.getElementById('live-dot').style.background = 'var(--red)';
+    }
+  }
+
+  function startRefresh() {
+    refresh();
+    refreshTimer = setInterval(refresh, 5000);
+  }
+
+  function esc(s) {
+    return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  // Auto-login if key saved
+  if (adminKey) {
+    document.getElementById('login-overlay').style.display = 'none';
+    startRefresh();
+  }
+</script>
+</body>
+</html>

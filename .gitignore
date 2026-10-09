@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Credentials — never commit these
+.env
+*.env
+
+# Scraped article content and FAISS indexes (regenerated on deploy)
+data/
+indexes/
+
+# SQLite databases
+*.db
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/

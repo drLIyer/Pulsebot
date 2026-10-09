@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pulsebot — Add your newsletter</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #f9f9f8;
+    --surface: #ffffff;
+    --border: #e5e5e3;
+    --text: #1a1a1a;
+    --muted: #737373;
+    --accent: #2563eb;
+    --accent-hover: #1d4ed8;
+    --accent-light: #eff6ff;
+    --success: #16a34a;
+    --success-light: #f0fdf4;
+    --error: #dc2626;
+    --error-light: #fef2f2;
+    --radius: 10px;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 48px 20px 80px;
+  }
+
+  header {
+    text-align: center;
+    margin-bottom: 48px;
+  }
+
+  .logo {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    color: var(--accent);
+    margin-bottom: 12px;
+  }
+
+  header h1 {
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -0.8px;
+    line-height: 1.2;
+    margin-bottom: 12px;
+  }
+
+  header p {
+    font-size: 16px;
+    color: var(--muted);
+    max-width: 480px;
+    line-height: 1.6;
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 32px;
+    width: 100%;
+    max-width: 520px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06);
+  }
+
+  .field { margin-bottom: 20px; }
+
+  label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 6px;
+    color: var(--text);
+  }
+
+  label .hint {
+    font-weight: 400;
+    color: var(--muted);
+    margin-left: 4px;
+  }
+
+  input[type="text"], input[type="url"] {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    font-size: 15px;
+    color: var(--text);
+    background: var(--surface);
+    transition: border-color .15s;
+    outline: none;
+  }
+
+  input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37,99,235,.1); }
+
+  .input-prefix {
+    display: flex;
+    align-items: center;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    overflow: hidden;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .input-prefix:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37,99,235,.1); }
+  .input-prefix span {
+    padding: 10px 10px 10px 12px;
+    font-size: 15px;
+    color: var(--muted);
+    background: #f5f5f4;
+    border-right: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .input-prefix input {
+    border: none;
+    border-radius: 0;
+    flex: 1;
+    box-shadow: none !important;
+  }
+  .input-prefix input:focus { box-shadow: none; }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 11px 24px;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    transition: background .15s, opacity .15s;
+    width: 100%;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+  }
+  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+  .btn:disabled { opacity: .55; cursor: not-allowed; }
+
+  /* Progress */
+  #progress-section { display: none; margin-top: 28px; }
+
+  .progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 8px;
+  }
+  .progress-label { font-size: 14px; font-weight: 600; color: var(--text); }
+  .progress-pct   { font-size: 13px; color: var(--muted); }
+
+  .progress-bar-track {
+    height: 6px;
+    background: #e5e5e3;
+    border-radius: 99px;
+    overflow: hidden;
+    margin-bottom: 20px;
+  }
+  .progress-bar-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 99px;
+    width: 0%;
+    transition: width .4s ease;
+  }
+
+  .stages { display: flex; flex-direction: column; gap: 8px; }
+
+  .stage {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 9px 13px;
+    border-radius: 8px;
+    font-size: 14px;
+    color: var(--muted);
+    background: #f5f5f4;
+    transition: all .2s;
+  }
+
+  .stage.active {
+    background: var(--accent-light);
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  .stage.done {
+    background: var(--success-light);
+    color: var(--success);
+  }
+
+  .stage.error-state {
+    background: var(--error-light);
+    color: var(--error);
+  }
+
+  .stage-icon { font-size: 15px; flex-shrink: 0; }
+
+  .spinner {
+    width: 14px; height: 14px;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+    flex-shrink: 0;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Result */
+  #result-section {
+    display: none;
+    margin-top: 28px;
+    padding: 20px;
+    border-radius: 8px;
+    background: var(--success-light);
+    border: 1px solid #bbf7d0;
+  }
+
+  #result-section h3 {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--success);
+    margin-bottom: 8px;
+  }
+
+  #result-section p {
+    font-size: 13px;
+    color: #166534;
+    margin-bottom: 12px;
+    line-height: 1.5;
+  }
+
+  .share-link-box {
+    display: flex;
+    gap: 8px;
+  }
+
+  .share-link-box input {
+    flex: 1;
+    padding: 8px 10px;
+    border: 1px solid #86efac;
+    border-radius: 6px;
+    font-size: 13px;
+    background: #fff;
+    color: var(--text);
+    outline: none;
+  }
+
+  .copy-btn {
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    background: var(--success);
+    color: #fff;
+    border: none;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background .15s;
+  }
+  .copy-btn:hover { background: #15803d; }
+
+  #error-msg {
+    display: none;
+    margin-top: 16px;
+    padding: 12px 14px;
+    background: var(--error-light);
+    border: 1px solid #fecaca;
+    border-radius: 8px;
+    font-size: 14px;
+    color: var(--error);
+  }
+
+  footer {
+    margin-top: 48px;
+    font-size: 13px;
+    color: var(--muted);
+    text-align: center;
+  }
+
+  /* LinkedIn auth */
+  .auth-section {
+    margin-bottom: 24px;
+    padding-bottom: 24px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .btn-linkedin {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    width: 100%;
+    padding: 11px 20px;
+    background: #0a66c2;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    text-decoration: none;
+    transition: background .15s;
+  }
+  .btn-linkedin:hover { background: #004182; }
+
+  .btn-linkedin svg { width: 20px; height: 20px; flex-shrink: 0; }
+
+  .user-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    background: #f0f7ff;
+    border: 1px solid #bfdbfe;
+    border-radius: 8px;
+  }
+
+  .user-avatar {
+    width: 40px; height: 40px;
+    border-radius: 50%;
+    object-fit: cover;
+    background: var(--accent-light);
+    flex-shrink: 0;
+  }
+
+  .user-avatar-placeholder {
+    width: 40px; height: 40px;
+    border-radius: 50%;
+    background: var(--accent-light);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    flex-shrink: 0;
+  }
+
+  .user-info { flex: 1; min-width: 0; }
+  .user-name { font-size: 14px; font-weight: 600; color: var(--text); }
+  .user-email { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .signout-btn {
+    font-size: 12px;
+    color: var(--muted);
+    text-decoration: none;
+    padding: 4px 8px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    white-space: nowrap;
+    cursor: pointer;
+    background: none;
+  }
+  .signout-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  .auth-divider {
+    text-align: center;
+    font-size: 12px;
+    color: var(--muted);
+    margin: 16px 0;
+    position: relative;
+  }
+  .auth-divider::before, .auth-divider::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    width: calc(50% - 60px);
+    height: 1px;
+    background: var(--border);
+  }
+  .auth-divider::before { left: 0; }
+  .auth-divider::after  { right: 0; }
+
+  .auth-error {
+    font-size: 13px;
+    color: var(--error);
+    background: var(--error-light);
+    border: 1px solid #fecaca;
+    border-radius: 7px;
+    padding: 9px 12px;
+    margin-bottom: 12px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">⚡ Pulsebot</div>
+  <h1>Turn your newsletter<br>into a chatbot</h1>
+  <p>Give your subscribers a way to search and chat with your entire LinkedIn newsletter archive.</p>
+</header>
+
+<div class="card">
+
+  <!-- LinkedIn OAuth -->
+  <div class="auth-section" id="auth-section">
+    <div id="auth-error" class="auth-error" style="display:none"></div>
+
+    <!-- Signed out -->
+    <a href="/auth/linkedin?next=/" class="btn-linkedin" id="linkedin-btn">
+      <svg viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+        <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+      </svg>
+      Sign in with LinkedIn
+    </a>
+
+    <!-- Signed in -->
+    <div class="user-card" id="user-card" style="display:none">
+      <div class="user-avatar-placeholder" id="user-avatar-wrap">👤</div>
+      <div class="user-info">
+        <div class="user-name" id="user-display-name"></div>
+        <div class="user-email" id="user-display-email"></div>
+      </div>
+      <form action="/auth/logout" method="post" style="margin:0">
+        <button type="submit" class="signout-btn">Sign out</button>
+      </form>
+    </div>
+
+    <div class="auth-divider" id="auth-divider">or continue manually</div>
+  </div>
+
+  <form id="onboard-form">
+    <div class="field">
+      <label>LinkedIn profile URL or handle</label>
+      <input type="text" id="author" placeholder="linkedin.com/in/your-handle  or  your-handle" required autocomplete="off" spellcheck="false" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:7px;font-size:15px;outline:none;transition:border-color .15s">
+    </div>
+
+    <div class="field">
+      <label>Newsletter URL <span class="hint">(optional, helps find more articles)</span></label>
+      <input type="url" id="newsletter-url" placeholder="https://www.linkedin.com/newsletters/your-newsletter-12345/">
+    </div>
+
+    <div class="field">
+      <label>Your display name <span class="hint">(shown to subscribers)</span></label>
+      <input type="text" id="display-name" placeholder="e.g. Lenny Rachitsky">
+    </div>
+
+    <button type="submit" class="btn btn-primary" id="submit-btn">
+      Build my chatbot
+    </button>
+  </form>
+
+  <div id="progress-section">
+    <div class="progress-header">
+      <span class="progress-label" id="progress-label">Starting…</span>
+      <span class="progress-pct" id="progress-pct">0%</span>
+    </div>
+    <div class="progress-bar-track">
+      <div class="progress-bar-fill" id="progress-bar"></div>
+    </div>
+    <div class="stages">
+      <div class="stage" id="stage-discover">
+        <span class="stage-icon">🔍</span>
+        <span class="stage-text">Discovering articles</span>
+      </div>
+      <div class="stage" id="stage-fetch">
+        <span class="stage-icon">📄</span>
+        <span class="stage-text">Fetching content</span>
+      </div>
+      <div class="stage" id="stage-index">
+        <span class="stage-icon">🗂️</span>
+        <span class="stage-text">Building search index</span>
+      </div>
+      <div class="stage" id="stage-done">
+        <span class="stage-icon">○</span>
+        <span class="stage-text">Ready</span>
+      </div>
+    </div>
+  </div>
+
+  <div id="result-section">
+    <h3>Your chatbot is ready!</h3>
+    <p id="result-stats"></p>
+    <div class="share-link-box">
+      <input type="text" id="share-link" readonly>
+      <button class="copy-btn" onclick="copyLink()">Copy link</button>
+    </div>
+  </div>
+
+  <div id="error-msg"></div>
+</div>
+
+<footer>Pulsebot MVP · Built with Claude</footer>
+
+<script>
+  const form = document.getElementById('onboard-form');
+  const submitBtn = document.getElementById('submit-btn');
+  let pollInterval = null;
+  let currentAuthor = '';
+
+  // ── Auth state ──────────────────────────────────────────────────────────────
+
+  function nameToHandle(name) {
+    return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  }
+
+  function escHtml(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  async function initAuth() {
+    // Show OAuth error from redirect if present
+    const params = new URLSearchParams(window.location.search);
+    const authErr = params.get('auth_error');
+    if (authErr) {
+      const errEl = document.getElementById('auth-error');
+      errEl.textContent = 'LinkedIn sign-in failed: ' + authErr;
+      errEl.style.display = 'block';
+    }
+
+    try {
+      const res = await fetch('/auth/me');
+      if (!res.ok) return;
+      const user = await res.json();
+
+      if (user.authenticated) {
+        // Show user card, hide sign-in button
+        document.getElementById('linkedin-btn').style.display = 'none';
+        document.getElementById('auth-divider').style.display = 'none';
+        const card = document.getElementById('user-card');
+        card.style.display = 'flex';
+
+        document.getElementById('user-display-name').textContent = user.name || 'LinkedIn user';
+        document.getElementById('user-display-email').textContent = user.email || '';
+
+        // Avatar
+        if (user.picture) {
+          const avatarWrap = document.getElementById('user-avatar-wrap');
+          const img = document.createElement('img');
+          img.src = user.picture;
+          img.alt = '';
+          img.className = 'user-avatar';
+          img.onerror = () => { img.style.display = 'none'; };
+          avatarWrap.replaceWith(img);
+          img.id = 'user-avatar-wrap';
+        }
+
+        // Auto-fill form fields if empty
+        const authorInput   = document.getElementById('author');
+        const displayInput  = document.getElementById('display-name');
+        if (!authorInput.value && user.name) {
+          authorInput.value = nameToHandle(user.name);
+        }
+        if (!displayInput.value && user.name) {
+          displayInput.value = user.name;
+        }
+      }
+    } catch (_) { /* non-fatal */ }
+  }
+
+  initAuth();
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const author = document.getElementById('author').value.trim().toLowerCase().replace(/\s+/g, '-');
+    const newsletterUrl = document.getElementById('newsletter-url').value.trim();
+    const displayName = document.getElementById('display-name').value.trim();
+
+    if (!author) return;
+    currentAuthor = author;
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Starting…';
+    document.getElementById('error-msg').style.display = 'none';
+    document.getElementById('result-section').style.display = 'none';
+
+    try {
+      const res = await fetch('/onboard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ author, newsletter_url: newsletterUrl || null, display_name: displayName || null }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Failed to start job');
+
+      // Use the server-returned author slug (handle extracted from URL)
+      currentAuthor = data.author;
+      showProgress();
+      pollInterval = setInterval(() => pollStatus(currentAuthor), 2000);
+    } catch (err) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Build my chatbot';
+      showError(err.message);
+    }
+  });
+
+  function setProgress(pct, label) {
+    document.getElementById('progress-bar').style.width = pct + '%';
+    document.getElementById('progress-pct').textContent = Math.round(pct) + '%';
+    document.getElementById('progress-label').textContent = label;
+  }
+
+  function showProgress() {
+    document.getElementById('progress-section').style.display = 'block';
+    setProgress(5, 'Starting…');
+    setStage('discover', 'active');
+    setStage('fetch', 'waiting');
+    setStage('index', 'waiting');
+    setStage('done', 'waiting');
+  }
+
+  const STAGE_ICONS = { discover: '🔍', fetch: '📄', index: '🗂️', done: '✅' };
+
+  function setStage(id, state) {
+    const el = document.getElementById('stage-' + id);
+    el.classList.remove('active', 'done', 'error-state');
+
+    // Always ensure .stage-icon exists — it may have been swapped out by a spinner on a prior call
+    let icon = el.querySelector('.stage-icon');
+    const spinner = el.querySelector('.spinner');
+    if (!icon) {
+      icon = document.createElement('span');
+      icon.className = 'stage-icon';
+      if (spinner) spinner.replaceWith(icon);
+      else el.prepend(icon);
+    } else if (spinner) {
+      spinner.remove();
+    }
+
+    if (state === 'active') {
+      el.classList.add('active');
+      const sp = document.createElement('div');
+      sp.className = 'spinner';
+      icon.replaceWith(sp);
+    } else if (state === 'done') {
+      el.classList.add('done');
+      icon.textContent = STAGE_ICONS[id];
+    } else if (state === 'error') {
+      el.classList.add('error-state');
+      icon.textContent = '❌';
+    } else {
+      // waiting state — neutral icon so it doesn't look complete
+      icon.textContent = id === 'done' ? '○' : STAGE_ICONS[id];
+    }
+  }
+
+  async function pollStatus(author) {
+    try {
+      const res = await fetch(`/onboard/${author}/status`);
+      const data = await res.json();
+
+      const fetched = data.articles_fetched || 0;
+      const found   = data.articles_found  || 0;
+
+      if (data.status === 'discovering') {
+        setProgress(10, 'Searching for articles…');
+        setStage('discover', 'active');
+
+      } else if (data.status === 'fetching') {
+        // Progress: 20%–75% scales with fetch completion
+        const fetchPct = found > 0 ? (fetched / found) : 0;
+        setProgress(20 + fetchPct * 55, `Fetching ${fetched} of ${found} articles…`);
+        setStage('discover', 'done');
+        document.querySelector('#stage-discover .stage-text').textContent =
+          `Found ${found} article${found !== 1 ? 's' : ''}`;
+        setStage('fetch', 'active');
+        document.querySelector('#stage-fetch .stage-text').textContent =
+          `Fetching content… (${fetched} / ${found})`;
+
+      } else if (data.status === 'indexing') {
+        setProgress(80, 'Building search index…');
+        setStage('discover', 'done');
+        setStage('fetch', 'done');
+        document.querySelector('#stage-fetch .stage-text').textContent =
+          `Fetched ${fetched} articles`;
+        setStage('index', 'active');
+
+      } else if (data.status === 'done') {
+        clearInterval(pollInterval);
+        setProgress(100, 'Done!');
+        setStage('discover', 'done');
+        setStage('fetch', 'done');
+        setStage('index', 'done');
+        setStage('done', 'done');
+        showResult(author, fetched, data.chunks || 0);
+
+      } else if (data.status === 'error') {
+        clearInterval(pollInterval);
+        setProgress(0, 'Failed');
+        setStage('discover', 'error');
+        showError(data.error || 'Something went wrong.');
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Try again';
+      }
+    } catch (err) {
+      // network blip — keep polling
+    }
+  }
+
+  function showResult(author, articles, chunks) {
+    const base = window.location.origin;
+    const link = `${base}/c/${author}`;
+    document.getElementById('share-link').value = link;
+    document.getElementById('result-stats').textContent =
+      `Indexed ${articles} articles into ${chunks} searchable chunks. Share the link below with your subscribers.`;
+    document.getElementById('result-section').style.display = 'block';
+    submitBtn.textContent = 'Update index';
+    submitBtn.disabled = false;
+  }
+
+  function showError(msg) {
+    const el = document.getElementById('error-msg');
+    el.textContent = msg;
+    el.style.display = 'block';
+  }
+
+  function copyLink() {
+    const input = document.getElementById('share-link');
+    input.select();
+    navigator.clipboard.writeText(input.value).catch(() => document.execCommand('copy'));
+    const btn = document.querySelector('.copy-btn');
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy link', 2000);
+  }
+</script>
+</body>
+</html>
