@@ -56,6 +56,9 @@ from models import Chunk
 import faiss
 import numpy as np
 import config as cfg
+import prompts as _prompts
+import cache as _cache_mod
+import guardrails as _guardrails
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -65,8 +68,13 @@ DB_PATH         = os.getenv("DB_PATH",     "./pulsebot.db")
 ADMIN_KEY       = os.getenv("ADMIN_KEY",   "changeme")
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",")]
 
-RERANKER_MODEL   = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+RERANKER_MODEL    = os.getenv("RERANKER_MODEL",  "cross-encoder/ms-marco-MiniLM-L-6-v2")
 HYBRID_CANDIDATES = int(os.getenv("HYBRID_CANDIDATES", "20"))
+
+RETRY_MAX      = int(os.getenv("RETRY_MAX",      "2"))
+RETRY_BACKOFF  = [float(x) for x in os.getenv("RETRY_BACKOFF",  "1,3").split(",")]
+FALLBACK_MODEL = os.getenv("FALLBACK_MODEL",  "claude-sonnet-5-5")
+STREAM_TIMEOUT = int(os.getenv("STREAM_TIMEOUT", "90"))
 
 # Support Align enterprise proxy: set ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
 _ANTHROPIC_BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "")
@@ -221,6 +229,37 @@ async def lifespan(app_: FastAPI):
                 created_at  REAL    NOT NULL,
                 expires_at  REAL    NOT NULL
             );
+
+            -- Per-request traces for observability and prompt debugging
+            CREATE TABLE IF NOT EXISTS traces (
+                id             TEXT PRIMARY KEY,
+                author         TEXT NOT NULL,
+                ip             TEXT,
+                query          TEXT,
+                answer         TEXT,
+                confidence     REAL,
+                prompt_version TEXT,
+                model          TEXT,
+                input_tokens   INTEGER DEFAULT 0,
+                output_tokens  INTEGER DEFAULT 0,
+                ttft_ms        INTEGER DEFAULT 0,
+                total_ms       INTEGER DEFAULT 0,
+                cache_hit      INTEGER DEFAULT 0,
+                error          TEXT,
+                created_at     TEXT DEFAULT (datetime('now'))
+            );
+
+            -- Reader feedback (thumbs up/down) linked to traces
+            CREATE TABLE IF NOT EXISTS feedback (
+                id             TEXT PRIMARY KEY,
+                trace_id       TEXT,
+                author         TEXT NOT NULL,
+                query          TEXT,
+                answer_preview TEXT,
+                rating         INTEGER NOT NULL,   -- 1 = up, -1 = down
+                note           TEXT,
+                created_at     TEXT DEFAULT (datetime('now'))
+            );
         """)
         await db.commit()
         # Authenticate with HuggingFace Hub to avoid anonymous rate limits
@@ -331,6 +370,7 @@ async def _check_daily_limit(author: str, ip: str, tier: str) -> tuple[bool, int
 _index_cache: dict[str, tuple[faiss.Index, list[Chunk]]] = {}
 _bm25_cache:  dict[str, object] = {}
 _reranker = None
+_sem_cache = _cache_mod._cache
 
 
 def _get_index(author: str) -> tuple[Optional[faiss.Index], list[Chunk]]:
@@ -371,6 +411,7 @@ def _rrf(ranked_lists: list[list[int]], k: int = 60) -> list[tuple[int, float]]:
 def _invalidate_cache(author: str) -> None:
     _index_cache.pop(author, None)
     _bm25_cache.pop(author, None)
+    _sem_cache.invalidate(author)
 
 def _list_indexed_authors() -> list[str]:
     idx_root = Path(INDEX_DIR)
@@ -393,6 +434,50 @@ async def log_usage(author: str, ip: str, input_tok: int, output_tok: int) -> No
             await db.commit()
     except Exception as e:
         log.warning(f"usage log error: {e}")
+
+
+_COST_PER_MTok = {
+    "claude-haiku-4-5-20251001": {"input": 0.80,  "output": 4.00},
+    "claude-sonnet-5-5":         {"input": 3.00,  "output": 15.00},
+    "claude-opus-5-5":           {"input": 15.00, "output": 75.00},
+}
+
+
+def _compute_cost(model: str, input_tokens: int, output_tokens: int) -> float:
+    prices = _COST_PER_MTok.get(model, {"input": 3.00, "output": 15.00})
+    return (input_tokens * prices["input"] + output_tokens * prices["output"]) / 1_000_000
+
+
+async def _log_trace(
+    trace_id:      str,
+    author:        str,
+    ip:            str,
+    query:         str,
+    answer:        str,
+    confidence:    float,
+    prompt_version: str,
+    model:         str,
+    input_tokens:  int,
+    output_tokens: int,
+    ttft_ms:       int,
+    total_ms:      int,
+    cache_hit:     bool = False,
+    error:         str  = "",
+) -> None:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """INSERT INTO traces
+                   (id, author, ip, query, answer, confidence, prompt_version, model,
+                    input_tokens, output_tokens, ttft_ms, total_ms, cache_hit, error)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (trace_id, author, ip, query, answer[:2000], confidence,
+                 prompt_version, model, input_tokens, output_tokens,
+                 ttft_ms, total_ms, int(cache_hit), error),
+            )
+            await db.commit()
+    except Exception as e:
+        log.warning(f"trace log error: {e}")
 
 
 async def _persist_job(job: dict) -> None:
@@ -504,26 +589,12 @@ async def _stream_claude(
     confidence_pct: float = 100.0,
 ) -> AsyncIterator[tuple[str, dict]]:
     """
-    Yields (event_type, payload) tuples.
-    event_type: "token" | "done" | "error"
+    Yields (event_type, payload) tuples: "token" | "done" | "error"
+    Retries up to RETRY_MAX times on 5xx / connection errors (before first token).
+    Switches to FALLBACK_MODEL on the final retry.
+    Enforces STREAM_TIMEOUT seconds total.
     """
-    client = _make_anthropic_client()
-
-    system = (
-        f"You are a knowledgeable assistant with access to {author}'s full LinkedIn newsletter archive. "
-        "Answer the user's question using the article excerpts provided below. "
-        "Cite article titles when referencing specific content. "
-        "Be concise, accurate, and conversational. "
-        "If the excerpts don't contain enough information to answer fully, say so honestly.\n\n"
-        f"ARTICLE EXCERPTS:\n{context}"
-    )
-    if confidence_pct < 50:
-        system += (
-            f"\n\nNOTE: Retrieval confidence for this question is low ({confidence_pct:.0f}%). "
-            "The newsletter may not cover this topic. "
-            "If you cannot answer with confidence from the excerpts, tell the reader explicitly "
-            "and remind them to verify with primary sources."
-        )
+    system, prompt_version = _prompts.get_system_prompt(author, context, confidence_pct)
 
     messages = list(history)
     messages.append({"role": "user", "content": query})
@@ -537,21 +608,54 @@ async def _stream_claude(
     if use_thinking:
         stream_kwargs["thinking"] = {"type": "enabled", "budget_tokens": 8000}
 
-    try:
-        async with client.messages.stream(**stream_kwargs) as stream:
-            async for text in stream.text_stream:
-                yield "token", {"text": text}
-            final = await stream.get_final_message()
-            usage = final.usage
-            yield "done", {
-                "usage": {
-                    "input_tokens":  usage.input_tokens,
-                    "output_tokens": usage.output_tokens,
-                    "model":         stream_kwargs["model"],
-                }
-            }
-    except anthropic.APIError as e:
-        yield "error", {"message": str(e)}
+    client  = _make_anthropic_client()
+    started = False
+
+    for attempt in range(RETRY_MAX + 1):
+        try:
+            async with asyncio.timeout(STREAM_TIMEOUT):
+                async with client.messages.stream(**stream_kwargs) as stream:
+                    async for text in stream.text_stream:
+                        started = True
+                        yield "token", {"text": text}
+                    final = await stream.get_final_message()
+                    usage = final.usage
+                    yield "done", {
+                        "usage": {
+                            "input_tokens":  usage.input_tokens,
+                            "output_tokens": usage.output_tokens,
+                            "model":         stream_kwargs["model"],
+                        },
+                        "prompt_version": prompt_version,
+                    }
+                    return
+        except asyncio.TimeoutError as exc:
+            if started or attempt >= RETRY_MAX:
+                yield "error", {"message": "Response timed out"}
+                return
+            log.warning(f"Stream timeout attempt {attempt + 1}/{RETRY_MAX + 1}")
+            err: Exception = exc
+        except anthropic.APIStatusError as exc:
+            if started or exc.status_code < 500 or attempt >= RETRY_MAX:
+                yield "error", {"message": str(exc)}
+                return
+            log.warning(f"API {exc.status_code} attempt {attempt + 1}/{RETRY_MAX + 1}")
+            err = exc
+        except anthropic.APIConnectionError as exc:
+            if started or attempt >= RETRY_MAX:
+                yield "error", {"message": str(exc)}
+                return
+            log.warning(f"Connection error attempt {attempt + 1}/{RETRY_MAX + 1}")
+            err = exc
+
+        backoff = RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)]
+        await asyncio.sleep(backoff)
+
+        if attempt == RETRY_MAX - 1 and not use_thinking:
+            log.warning(f"Switching to fallback model {FALLBACK_MODEL}")
+            stream_kwargs["model"] = FALLBACK_MODEL
+
+    yield "error", {"message": f"Request failed after {RETRY_MAX + 1} attempts"}
 
 # ── Request / response models ──────────────────────────────────────────────────
 
@@ -570,7 +674,16 @@ _MODEL_META = {
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "models": cfg.MODELS}
+    return {
+        "status": "ok",
+        "models": cfg.MODELS,
+        "cache": {
+            "enabled":  _cache_mod.CACHE_ENABLED,
+            "size":     _sem_cache.size,
+            "hit_rate": _sem_cache.hit_rate,
+        },
+        "prompt_versions": _prompts.list_versions(),
+    }
 
 
 @app.get("/models")
@@ -612,12 +725,17 @@ async def author_info(author: str):
 async def chat(author: str, body: ChatRequest, request: Request):
     ip = _real_ip(request)
 
+    # Guardrails: input check
+    safe, block_reason = _guardrails.check_input(body.query)
+    if not safe:
+        raise HTTPException(400, {"type": "blocked", "message": block_reason})
+
     # Check index exists
     idx, _ = _get_index(author)
     if idx is None:
         raise HTTPException(404, f"No newsletter index found for author '{author}'")
 
-    # Resolve tier (author-pays: tier follows author; else per-subscriber would need auth)
+    # Resolve tier
     tier = await _get_author_tier(author) if cfg.AUTHOR_PAYS else "free"
 
     # Daily question limit check
@@ -636,7 +754,7 @@ async def chat(author: str, body: ChatRequest, request: Request):
             },
         )
 
-    # Resolve model: request override (validated) > tier default
+    # Resolve model
     if body.model:
         if body.model not in cfg.AVAILABLE_MODELS:
             raise HTTPException(400, f"Model '{body.model}' is not available")
@@ -645,18 +763,46 @@ async def chat(author: str, body: ChatRequest, request: Request):
         chat_model = cfg.MODELS.get(tier, cfg.MODELS["free"])
 
     # Tier-specific settings
-    top_k        = cfg.TOP_K[tier]
-    history_turns = cfg.HISTORY_TURNS[tier]
+    top_k           = cfg.TOP_K[tier]
+    history_turns   = cfg.HISTORY_TURNS[tier]
     trimmed_history = list(body.history[-(history_turns * 2):]) if history_turns > 0 else []
 
+    # Semantic cache lookup (skip when caller wants chunks for evals)
+    trace_id   = secrets.token_hex(8)
+    t_start    = time.monotonic()
+    cache_hit  = False
+
+    if not body.include_context:
+        cached = _sem_cache.get(body.query, author)
+        if cached is not None:
+            cache_hit = True
+            cached_sources     = cached.get("sources", [])
+            cached_answer      = cached.get("answer", "")
+            cached_confidence  = cached.get("confidence", 1.0)
+            cached_conf_pct    = cached_confidence * 100
+
+            async def cached_stream() -> AsyncIterator[str]:
+                yield f"data: {json.dumps({'type': 'sources', 'sources': cached_sources})}\n\n"
+                yield f"data: {json.dumps({'type': 'confidence', 'score': round(cached_confidence, 3), 'low': cached_confidence < 0.5})}\n\n"
+                yield f"data: {json.dumps({'type': 'cache', 'similarity': cached.get('cache_similarity', 1.0)})}\n\n"
+                yield f"data: {json.dumps({'type': 'token', 'text': cached_answer})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'usage': {'input_tokens': 0, 'output_tokens': 0, 'model': 'cache'}})}\n\n"
+
+            total_ms = (time.monotonic() - t_start) * 1000
+            asyncio.create_task(_log_trace(
+                trace_id, author, ip, body.query, cached_answer, cached_conf_pct,
+                "cache", "cache", 0, 0, 0.0, total_ms, cache_hit=True,
+            ))
+            return StreamingResponse(cached_stream(), media_type="text/event-stream")
+
     # RAG retrieval
-    hits = _rag_search(body.query, author, top_k=top_k)
-    context = _build_context(hits)
-    sources = [
+    hits       = _rag_search(body.query, author, top_k=top_k)
+    context    = _build_context(hits)
+    sources    = [
         {"title": h["title"], "url": h["url"], "score": round(h["score"], 3), "date": h["date"]}
         for h in hits
     ]
-    confidence = _retrieval_confidence(hits)
+    confidence     = _retrieval_confidence(hits)
     confidence_pct = confidence * 100
 
     async def event_stream() -> AsyncIterator[str]:
@@ -666,7 +812,13 @@ async def chat(author: str, body: ChatRequest, request: Request):
             chunk_payloads = [{"title": h["title"], "url": h["url"], "text": h["text"]} for h in hits]
             yield f"data: {json.dumps({'type': 'context', 'text': context, 'chunks': chunk_payloads})}\n\n"
 
+        answer_parts: list[str] = []
         input_tok = output_tok = 0
+        prompt_version = "v1"
+        ttft_ms   = 0.0
+        error_msg = ""
+        first_token = True
+
         async for event_type, payload in _stream_claude(
             author, body.query, context, trimmed_history,
             use_thinking=(tier == "power"),
@@ -674,17 +826,199 @@ async def chat(author: str, body: ChatRequest, request: Request):
             confidence_pct=confidence_pct,
         ):
             if event_type == "token":
+                if first_token:
+                    ttft_ms    = (time.monotonic() - t_start) * 1000
+                    first_token = False
+                answer_parts.append(payload["text"])
                 yield f"data: {json.dumps({'type': 'token', 'text': payload['text']})}\n\n"
             elif event_type == "done":
-                usage = payload.get("usage", {})
-                input_tok = usage.get("input_tokens", 0)
-                output_tok = usage.get("output_tokens", 0)
+                usage          = payload.get("usage", {})
+                input_tok      = usage.get("input_tokens", 0)
+                output_tok     = usage.get("output_tokens", 0)
+                prompt_version = payload.get("prompt_version", "v1")
                 yield f"data: {json.dumps({'type': 'done', 'usage': usage})}\n\n"
                 asyncio.create_task(log_usage(author, ip, input_tok, output_tok))
             elif event_type == "error":
-                yield f"data: {json.dumps({'type': 'error', 'message': payload['message']})}\n\n"
+                error_msg = payload["message"]
+                yield f"data: {json.dumps({'type': 'error', 'message': error_msg})}\n\n"
+
+        # Post-stream: output guardrail, cache store, trace
+        answer   = "".join(answer_parts)
+        total_ms = (time.monotonic() - t_start) * 1000
+
+        out_safe, out_reason = _guardrails.check_output(answer)
+        if not out_safe and answer:
+            yield f"data: {json.dumps({'type': 'error', 'message': out_reason})}\n\n"
+            answer = ""
+
+        if answer and not body.include_context:
+            _sem_cache.put(body.query, author, answer, sources, confidence)
+
+        asyncio.create_task(_log_trace(
+            trace_id, author, ip, body.query, answer, confidence_pct,
+            prompt_version, chat_model, input_tok, output_tok,
+            ttft_ms, total_ms, cache_hit=False, error=error_msg,
+        ))
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+# ── Feedback & Admin Endpoints ─────────────────────────────────────────────────
+
+class FeedbackRequest(BaseModel):
+    trace_id: str = Field(..., min_length=1, max_length=64)
+    rating:   int = Field(..., ge=1, le=5)
+    note:     Optional[str] = Field(default=None, max_length=1000)
+
+
+@app.post("/feedback/{author}")
+async def submit_feedback(author: str, body: FeedbackRequest, request: Request):
+    ip = _real_ip(request)
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO feedback (trace_id, author, ip, rating, note) VALUES (?, ?, ?, ?, ?)",
+                (body.trace_id, author, ip, body.rating, body.note or ""),
+            )
+            await db.commit()
+    except Exception as e:
+        log.warning(f"feedback write error: {e}")
+        raise HTTPException(500, "Failed to record feedback")
+    return {"ok": True}
+
+
+@app.get("/admin/traces")
+async def get_traces(
+    author: Optional[str] = None,
+    limit:  int = 50,
+    x_admin_key: str = Header(None),
+):
+    if not _check_admin_key(x_admin_key):
+        raise HTTPException(403, "Invalid admin key")
+    limit = min(max(limit, 1), 500)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if author:
+            rows = await db.execute_fetchall(
+                "SELECT * FROM traces WHERE author=? ORDER BY ts DESC LIMIT ?",
+                (author, limit),
+            )
+        else:
+            rows = await db.execute_fetchall(
+                "SELECT * FROM traces ORDER BY ts DESC LIMIT ?", (limit,)
+            )
+    return {"traces": [dict(r) for r in rows]}
+
+
+@app.get("/admin/metrics")
+async def get_metrics(
+    author: Optional[str] = None,
+    x_admin_key: str = Header(None),
+):
+    if not _check_admin_key(x_admin_key):
+        raise HTTPException(403, "Invalid admin key")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        where  = "WHERE author=?" if author else ""
+        params = (author,) if author else ()
+
+        rows = await db.execute_fetchall(
+            f"SELECT confidence, total_ms, input_tokens, output_tokens, model, "
+            f"cache_hit, error FROM traces {where} ORDER BY ts DESC LIMIT 1000",
+            params,
+        )
+
+    rows = [dict(r) for r in rows]
+    if not rows:
+        return {"metrics": {}, "message": "No traces yet"}
+
+    conf_vals    = [r["confidence"] for r in rows if r["confidence"] is not None]
+    lat_vals     = [r["total_ms"]   for r in rows if r["total_ms"]   is not None]
+    cache_hits   = sum(1 for r in rows if r["cache_hit"])
+    errors       = sum(1 for r in rows if r.get("error"))
+    total        = len(rows)
+
+    def pct(data, p):
+        if not data:
+            return None
+        s = sorted(data)
+        idx = int(len(s) * p / 100)
+        return round(s[min(idx, len(s) - 1)], 1)
+
+    total_cost = sum(
+        _compute_cost(r["model"] or "", r["input_tokens"] or 0, r["output_tokens"] or 0)
+        for r in rows
+    )
+
+    conf_dist = {"lt50": 0, "50_75": 0, "gte75": 0}
+    for c in conf_vals:
+        if c < 50:
+            conf_dist["lt50"] += 1
+        elif c < 75:
+            conf_dist["50_75"] += 1
+        else:
+            conf_dist["gte75"] += 1
+
+    return {
+        "total_queries": total,
+        "cache_hit_rate": round(cache_hits / total, 3) if total else 0,
+        "error_rate":     round(errors   / total, 3) if total else 0,
+        "confidence": {
+            "mean":       round(sum(conf_vals) / len(conf_vals), 1) if conf_vals else None,
+            "distribution": conf_dist,
+        },
+        "latency_ms": {
+            "p50": pct(lat_vals, 50),
+            "p95": pct(lat_vals, 95),
+            "p99": pct(lat_vals, 99),
+        },
+        "cost_usd": {"total": round(total_cost, 4), "per_query": round(total_cost / total, 5) if total else 0},
+        "cache": {
+            "size":     _sem_cache.size,
+            "hit_rate": _sem_cache.hit_rate,
+        },
+        "prompt_versions": _prompts.list_versions(),
+    }
+
+
+@app.post("/admin/feedback/golden")
+async def export_golden(
+    author: str,
+    min_rating: int = 1,
+    x_admin_key: str = Header(None),
+):
+    """Export low-rated answers to a golden.json file for evals regression."""
+    if not _check_admin_key(x_admin_key):
+        raise HTTPException(403, "Invalid admin key")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await db.execute_fetchall(
+            """SELECT t.query, t.answer, f.rating, f.note
+               FROM feedback f
+               JOIN traces t ON t.trace_id = f.trace_id
+               WHERE f.author=? AND f.rating <= ?
+               ORDER BY f.rating ASC LIMIT 200""",
+            (author, min_rating),
+        )
+
+    items = [dict(r) for r in rows]
+    golden = [
+        {
+            "question": r["query"],
+            "expected_answer": r["answer"],
+            "note": r["note"] or "",
+            "rating": r["rating"],
+        }
+        for r in items
+    ]
+
+    out_dir  = Path("evals") / author
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "golden.json"
+    out_path.write_text(json.dumps(golden, indent=2))
+    return {"ok": True, "path": str(out_path), "count": len(golden)}
 
 
 @app.post("/admin/index/{author}")
