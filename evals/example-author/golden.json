@@ -1,0 +1,32 @@
+[
+  {
+    "id": "q1",
+    "question": "What is your most important advice for early-stage founders?",
+    "expected_keywords": ["founder", "product", "customer", "early"],
+    "tags": ["founders", "advice"]
+  },
+  {
+    "id": "q2",
+    "question": "How do you think about product-market fit?",
+    "expected_answer": "Product-market fit is when you have found a product that satisfies a strong market demand. Signs include high retention, organic growth, and customers who would be very disappointed if the product disappeared.",
+    "tags": ["pmf", "product"]
+  },
+  {
+    "id": "q3",
+    "question": "What is the best way to hire engineers?",
+    "expected_keywords": ["engineer", "hire", "interview", "culture", "team"],
+    "tags": ["hiring", "engineering"]
+  },
+  {
+    "id": "q4",
+    "question": "What should a startup's growth strategy look like in year one?",
+    "expected_answer": "In year one, a startup should focus on finding product-market fit rather than scaling. Talk to customers daily, iterate quickly, and resist the urge to grow the team before the product is working.",
+    "tags": ["growth", "strategy"]
+  },
+  {
+    "id": "q5",
+    "question": "How do quantum computers work?",
+    "expected_keywords": ["qubit", "superposition", "entanglement"],
+    "tags": ["off-topic"]
+  }
+]

@@ -22,6 +22,7 @@ from typing import Optional
 import numpy as np
 import frontmatter
 import faiss
+from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn
@@ -33,6 +34,11 @@ console = Console()
 MODEL_NAME = "all-MiniLM-L6-v2"
 CHUNK_WORDS = 400
 OVERLAP_WORDS = 50
+
+
+def tokenize(text: str) -> list[str]:
+    """Shared tokenizer for BM25 — must be identical at index time and query time."""
+    return re.sub(r"[^\w\s]", " ", text.lower()).split()
 
 
 # ── Text chunking ──────────────────────────────────────────────────────────────
@@ -118,6 +124,23 @@ def load_index(base_dir: str, author: str) -> tuple[Optional[faiss.Index], list[
             chunks = pickle.load(f)
         return idx, chunks
     return None, []
+
+
+def save_bm25_index(base_dir: str, author: str, chunks: list[Chunk]) -> None:
+    d = _index_dir(base_dir, author)
+    bm25 = BM25Okapi([tokenize(c.text) for c in chunks])
+    with open(d / "bm25.pkl", "wb") as f:
+        pickle.dump(bm25, f)
+    console.print(f"[green]✓ Saved BM25 index: {len(chunks)} documents[/green]")
+
+
+def load_bm25_index(base_dir: str, author: str) -> Optional[BM25Okapi]:
+    d = _index_dir(base_dir, author)
+    bm25_path = d / "bm25.pkl"
+    if bm25_path.exists():
+        with open(bm25_path, "rb") as f:
+            return pickle.load(f)
+    return None
 
 
 def save_index(base_dir: str, author: str, idx: faiss.Index, chunks: list[Chunk]) -> None:
@@ -218,6 +241,7 @@ def build_index(
         existing_idx = idx
 
     save_index(index_dir, author, existing_idx, all_chunks)
+    save_bm25_index(index_dir, author, all_chunks)
     return existing_idx, all_chunks
 
 

@@ -14,16 +14,19 @@ Endpoints:
   GET  /admin/usage
 
 SSE event format:
-  data: {"type": "sources", "sources": [{title, url, score}, ...]}
-  data: {"type": "token",   "text": "..."}
-  data: {"type": "done",    "usage": {input_tokens, output_tokens}}
-  data: {"type": "error",   "message": "..."}
-  data: {"type": "limit",   "tier": "free", "daily_limit": 10, "upgrade_url": "..."}
+  data: {"type": "sources",    "sources": [{title, url, score}, ...]}
+  data: {"type": "confidence", "score": 0.0-1.0, "low": bool}
+  data: {"type": "context",    "text": "..."}   # only when include_context=true in request
+  data: {"type": "token",      "text": "..."}
+  data: {"type": "done",       "usage": {input_tokens, output_tokens}}
+  data: {"type": "error",      "message": "..."}
+  data: {"type": "limit",      "tier": "free", "daily_limit": 10, "upgrade_url": "..."}
 
 Run:
   ANTHROPIC_API_KEY=sk-... uvicorn api:app --reload --port 8000
 """
 
+import math
 import os
 import re
 import json
@@ -47,7 +50,8 @@ from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from indexer import load_index, get_model
+from indexer import load_index, get_model, load_bm25_index, tokenize
+from sentence_transformers import CrossEncoder
 from models import Chunk
 import faiss
 import numpy as np
@@ -60,6 +64,9 @@ DATA_DIR        = os.getenv("DATA_DIR",    "./data")
 DB_PATH         = os.getenv("DB_PATH",     "./pulsebot.db")
 ADMIN_KEY       = os.getenv("ADMIN_KEY",   "changeme")
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",")]
+
+RERANKER_MODEL   = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+HYBRID_CANDIDATES = int(os.getenv("HYBRID_CANDIDATES", "20"))
 
 # Support Align enterprise proxy: set ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
 _ANTHROPIC_BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "")
@@ -322,6 +329,9 @@ async def _check_daily_limit(author: str, ip: str, tier: str) -> tuple[bool, int
 # ── Index cache (lazy-loaded per author) ──────────────────────────────────────
 
 _index_cache: dict[str, tuple[faiss.Index, list[Chunk]]] = {}
+_bm25_cache:  dict[str, object] = {}
+_reranker = None
+
 
 def _get_index(author: str) -> tuple[Optional[faiss.Index], list[Chunk]]:
     if author not in _index_cache:
@@ -332,8 +342,35 @@ def _get_index(author: str) -> tuple[Optional[faiss.Index], list[Chunk]]:
             return None, []
     return _index_cache[author]
 
+
+def _get_bm25(author: str):
+    if author not in _bm25_cache:
+        bm25 = load_bm25_index(INDEX_DIR, author)
+        if bm25 is not None:
+            _bm25_cache[author] = bm25
+    return _bm25_cache.get(author)
+
+
+def _get_reranker():
+    global _reranker
+    if _reranker is None:
+        log.info(f"Loading reranker {RERANKER_MODEL}…")
+        _reranker = CrossEncoder(RERANKER_MODEL)
+    return _reranker
+
+
+def _rrf(ranked_lists: list[list[int]], k: int = 60) -> list[tuple[int, float]]:
+    """Reciprocal Rank Fusion — merges multiple ranked lists without score normalisation."""
+    scores: dict[int, float] = {}
+    for ranked in ranked_lists:
+        for rank, doc_id in enumerate(ranked, start=1):
+            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank)
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+
 def _invalidate_cache(author: str) -> None:
     _index_cache.pop(author, None)
+    _bm25_cache.pop(author, None)
 
 def _list_indexed_authors() -> list[str]:
     idx_root = Path(INDEX_DIR)
@@ -400,26 +437,51 @@ async def _log_onboard_error(author: str, stage: str, message: str, url: str = "
 
 def _rag_search(query: str, author: str, top_k: int = 5) -> list[dict]:
     idx, chunks = _get_index(author)
-    if idx is None:
+    if idx is None or not chunks:
         return []
+
+    candidates = min(HYBRID_CANDIDATES, len(chunks))
+
+    # ── Vector search ──────────────────────────────────────────────────────────
     model = get_model()
     q_emb = model.encode([query], convert_to_numpy=True).astype(np.float32)
     faiss.normalize_L2(q_emb)
-    scores, indices = idx.search(q_emb, top_k)
-    results = []
-    for score, i in zip(scores[0], indices[0]):
-        if i < 0:
-            continue
-        c = chunks[i]
-        results.append({
+    _, vec_indices = idx.search(q_emb, candidates)
+    vec_ranked = [int(i) for i in vec_indices[0] if i >= 0]
+
+    # ── BM25 search + RRF fusion ───────────────────────────────────────────────
+    bm25 = _get_bm25(author)
+    if bm25 is not None:
+        bm25_scores = bm25.get_scores(tokenize(query))
+        bm25_ranked = sorted(range(len(chunks)), key=lambda i: bm25_scores[i], reverse=True)[:candidates]
+        candidate_ids = [doc_id for doc_id, _ in _rrf([vec_ranked, bm25_ranked])][:candidates]
+    else:
+        candidate_ids = vec_ranked
+
+    # ── Cross-encoder reranking ────────────────────────────────────────────────
+    reranker = _get_reranker()
+    pairs = [[query, chunks[i].text] for i in candidate_ids]
+    rerank_scores = reranker.predict(pairs)
+    reranked = sorted(zip(candidate_ids, rerank_scores), key=lambda x: x[1], reverse=True)
+
+    return [
+        {
             "score": float(score),
-            "title": c.title,
-            "url": c.url,
-            "date": c.date,
-            "chunk_index": c.chunk_index,
-            "text": c.text,
-        })
-    return results
+            "title": chunks[i].title,
+            "url": chunks[i].url,
+            "date": chunks[i].date,
+            "chunk_index": chunks[i].chunk_index,
+            "text": chunks[i].text,
+        }
+        for i, score in reranked[:top_k]
+    ]
+
+def _retrieval_confidence(hits: list[dict]) -> float:
+    """Sigmoid of the top cross-encoder score → [0, 1].  0 when no hits."""
+    if not hits:
+        return 0.0
+    return 1.0 / (1.0 + math.exp(-hits[0]["score"]))
+
 
 def _build_context(hits: list[dict]) -> str:
     parts = []
@@ -439,6 +501,7 @@ async def _stream_claude(
     history: list[dict],
     use_thinking: bool = False,
     model: str = "",
+    confidence_pct: float = 100.0,
 ) -> AsyncIterator[tuple[str, dict]]:
     """
     Yields (event_type, payload) tuples.
@@ -454,6 +517,13 @@ async def _stream_claude(
         "If the excerpts don't contain enough information to answer fully, say so honestly.\n\n"
         f"ARTICLE EXCERPTS:\n{context}"
     )
+    if confidence_pct < 50:
+        system += (
+            f"\n\nNOTE: Retrieval confidence for this question is low ({confidence_pct:.0f}%). "
+            "The newsletter may not cover this topic. "
+            "If you cannot answer with confidence from the excerpts, tell the reader explicitly "
+            "and remind them to verify with primary sources."
+        )
 
     messages = list(history)
     messages.append({"role": "user", "content": query})
@@ -475,8 +545,9 @@ async def _stream_claude(
             usage = final.usage
             yield "done", {
                 "usage": {
-                    "input_tokens": usage.input_tokens,
+                    "input_tokens":  usage.input_tokens,
                     "output_tokens": usage.output_tokens,
+                    "model":         stream_kwargs["model"],
                 }
             }
     except anthropic.APIError as e:
@@ -488,6 +559,7 @@ class ChatRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=2000)
     history: list[dict] = Field(default_factory=list)
     model: Optional[str] = Field(default=None, max_length=100)
+    include_context: bool = Field(default=False)  # evals: include retrieved chunks in stream
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
@@ -584,15 +656,22 @@ async def chat(author: str, body: ChatRequest, request: Request):
         {"title": h["title"], "url": h["url"], "score": round(h["score"], 3), "date": h["date"]}
         for h in hits
     ]
+    confidence = _retrieval_confidence(hits)
+    confidence_pct = confidence * 100
 
     async def event_stream() -> AsyncIterator[str]:
         yield f"data: {json.dumps({'type': 'sources', 'sources': sources})}\n\n"
+        yield f"data: {json.dumps({'type': 'confidence', 'score': round(confidence, 3), 'low': confidence < 0.5})}\n\n"
+        if body.include_context:
+            chunk_payloads = [{"title": h["title"], "url": h["url"], "text": h["text"]} for h in hits]
+            yield f"data: {json.dumps({'type': 'context', 'text': context, 'chunks': chunk_payloads})}\n\n"
 
         input_tok = output_tok = 0
         async for event_type, payload in _stream_claude(
             author, body.query, context, trimmed_history,
             use_thinking=(tier == "power"),
             model=chat_model,
+            confidence_pct=confidence_pct,
         ):
             if event_type == "token":
                 yield f"data: {json.dumps({'type': 'token', 'text': payload['text']})}\n\n"
