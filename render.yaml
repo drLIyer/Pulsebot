@@ -1,0 +1,58 @@
+services:
+  - type: web
+    name: pulsebot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash run.sh
+    healthCheckPath: /health
+
+    envVars:
+      # ── Required ────────────────────────────────────────────────────────────
+      - key: ANTHROPIC_API_KEY
+        sync: false          # Render will prompt you to enter this after connecting the repo
+
+      - key: ADMIN_KEY
+        sync: false          # Set a strong secret — protects /admin/dashboard
+
+      # ── Persistent storage paths (all written to the mounted disk) ──────────
+      - key: DB_PATH
+        value: /var/data/pulsebot.db
+
+      - key: DATA_DIR
+        value: /var/data/articles
+
+      - key: INDEX_DIR
+        value: /var/data/indexes
+
+      # ── Runtime ─────────────────────────────────────────────────────────────
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+
+      - key: WORKERS
+        value: "1"           # Keep at 1 — in-memory job tracker is per-process
+
+      # ── Optional: article discovery ─────────────────────────────────────────
+      # - key: SEARCH_ENGINE
+      #   value: brave        # brave | google | duckduckgo (default). Brave recommended for production.
+      # - key: BRAVE_API_KEY
+      #   sync: false
+
+      # ── Optional: HuggingFace (avoids rate limits on embedding model download)
+      # - key: HF_TOKEN
+      #   sync: false
+
+      # ── Optional: LinkedIn OAuth ─────────────────────────────────────────────
+      # - key: LINKEDIN_CLIENT_ID
+      #   sync: false
+      # - key: LINKEDIN_CLIENT_SECRET
+      #   sync: false
+      # - key: APP_BASE_URL
+      #   value: https://pulsebot.onrender.com   # update to your actual Render URL
+      # - key: SESSION_SECRET
+      #   sync: false
+
+    disk:
+      name: pulsebot-data
+      mountPath: /var/data
+      sizeGB: 1              # $0.25/month — stores articles, FAISS indexes, and SQLite DB
